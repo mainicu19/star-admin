@@ -31,6 +31,9 @@
               color:var(--navy); font-weight:700; text-decoration:none; }
   .err { color:#b3261e; }
   .hidden { display:none; }
+  .or { text-align:center; color:var(--muted); font-size:13px; margin:14px 0 8px; }
+  #emailTo { width:100%; font:inherit; padding:12px; border:1px solid #c4cad2; border-radius:10px; margin:0 0 10px; }
+  button.go.alt { background:#fff; color:var(--navy); border:2px solid var(--navy); }
   #pin { width:100%; font:inherit; font-size:18px; padding:12px; border:1px solid #c4cad2; border-radius:10px; margin:0 0 10px; letter-spacing:2px; }
   #pinMsg { font-size:13px; min-height:20px; margin-top:8px; }
   .lock { background:none; border:0; color:var(--muted); font:inherit; font-size:13px; text-decoration:underline; cursor:pointer; float:right; }
@@ -55,9 +58,13 @@
     <div id="months">Loading…</div>
   </div>
   <div class="card">
-    <h2>2. Download</h2>
+    <h2>2. Download or e-mail</h2>
     <label class="chk"><input type="checkbox" id="summary" checked> Add a summary page at the front</label>
     <button class="go" id="go" disabled>Select a month first</button>
+    <div class="or">or e-mail it</div>
+    <input id="emailTo" type="email" inputmode="email" autocomplete="email" multiple
+           placeholder="name@example.com (separate several with commas)">
+    <button class="go alt" id="send" disabled>E-mail PDF</button>
     <div class="bar" id="bar"><div></div></div>
     <div id="status"></div>
     <div id="result"></div>
@@ -145,50 +152,90 @@ async function buildMonthPdf(PDFLib, monthLabel, items, pdfBytesList, withSummar
     });
   }
 
+  const bytesToB64 = bytes => {
+    let s = '';
+    for (let i = 0; i < bytes.length; i += 0x8000) s += String.fromCharCode.apply(null, bytes.subarray(i, i + 0x8000));
+    return btoa(s);
+  };
+  const plural = n => n + ' nomination' + (n === 1 ? '' : 's');
+  try { $('emailTo').value = localStorage.getItem('starEmailTo') || ''; } catch (e) {}
+
   function updateButton() {
-    const go = $('go');
-    go.disabled = !selected || !selected.ready;
+    const go = $('go'), send = $('send');
+    const ok = !!(selected && selected.ready);
+    go.disabled = send.disabled = !ok;
     go.textContent = !selected ? 'Select a month first'
       : !selected.ready ? 'No PDFs for this month yet'
       : 'Download ' + selected.label + ' (' + selected.ready + ' PDF' + (selected.ready === 1 ? '' : 's') + ')';
+    send.textContent = ok ? 'E-mail ' + selected.label + ' PDF' : 'E-mail PDF';
     $('result').innerHTML = '';
   }
 
+  /** Fetches every nomination PDF for month m and combines them. */
+  async function buildFor(m) {
+    $('bar').style.display = 'block'; const fill = $('bar').firstElementChild; fill.style.width = '0';
+    setStatus('Reading the list…');
+    const items = (await call('getMonth', pin, m.key)).filter(it => it.id);
+    if (!items.length) throw new Error('No PDFs for this month yet.');
+    const bytes = new Array(items.length); let done = 0;
+    const queue = items.map((it, i) => i);
+    const worker = async () => {
+      while (queue.length) {
+        const i = queue.shift();
+        bytes[i] = b64ToBytes(await call('getPdf', pin, items[i].id));
+        done++; fill.style.width = (done / items.length * 80) + '%';
+        setStatus('Fetching PDFs… ' + done + ' / ' + items.length);
+      }
+    };
+    await Promise.all([worker(), worker(), worker(), worker()]);
+    setStatus('Combining into one PDF…');
+    const out = await buildMonthPdf(PDFLib, m.label, items, bytes, $('summary').checked);
+    fill.style.width = '90%';
+    return { out, items, name: 'STAR_Nominations_' + m.key + '.pdf', fill };
+  }
+
+  const busy = on => { $('go').disabled = $('send').disabled = on; };
+
   $('go').onclick = async () => {
     const m = selected; if (!m) return;
-    $('go').disabled = true; $('result').innerHTML = '';
-    $('bar').style.display = 'block'; const fill = $('bar').firstElementChild; fill.style.width = '0';
+    busy(true); $('result').innerHTML = '';
     try {
-      setStatus('Reading the list…');
-      const items = (await call('getMonth', pin, m.key)).filter(it => it.id);
-      const bytes = new Array(items.length); let done = 0;
-      const queue = items.map((it, i) => i);
-      const worker = async () => {
-        while (queue.length) {
-          const i = queue.shift();
-          bytes[i] = b64ToBytes(await call('getPdf', pin, items[i].id));
-          done++; fill.style.width = (done / items.length * 90) + '%';
-          setStatus('Fetching PDFs… ' + done + ' / ' + items.length);
-        }
-      };
-      await Promise.all([worker(), worker(), worker(), worker()]);
-      setStatus('Combining into one PDF…');
-      const out = await buildMonthPdf(PDFLib, m.label, items, bytes, $('summary').checked);
+      const { out, items, name, fill } = await buildFor(m);
       fill.style.width = '100%';
       if (lastUrl) URL.revokeObjectURL(lastUrl);
       lastUrl = URL.createObjectURL(new Blob([out], { type: 'application/pdf' }));
-      const name = 'STAR_Nominations_' + m.key + '.pdf';
       const a = document.createElement('a');
       a.href = lastUrl; a.download = name; a.target = '_blank';
       a.textContent = 'Save ' + name;
       $('result').appendChild(a);
       a.click();
-      setStatus('Done – ' + items.length + ' nomination' + (items.length === 1 ? '' : 's') +
-                '. If the download did not start, tap the button above.');
+      setStatus('Done – ' + plural(items.length) + '. If the download did not start, tap the button above.');
     } catch (e) {
       setStatus('Something went wrong: ' + (e && e.message ? e.message : e), true);
     } finally {
-      $('go').disabled = false;
+      busy(false);
+    }
+  };
+
+  $('send').onclick = async () => {
+    const m = selected; if (!m) return;
+    const to = $('emailTo').value.trim();
+    const list = to.split(/[\s,;]+/).filter(Boolean);
+    if (!list.length) { setStatus('Enter the e-mail address to send to.', true); $('emailTo').focus(); return; }
+    const bad = list.filter(a => !/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(a));
+    if (bad.length) { setStatus('Not a valid e-mail address: ' + bad.join(', '), true); $('emailTo').focus(); return; }
+    busy(true); $('result').innerHTML = '';
+    try {
+      const { out, items, name, fill } = await buildFor(m);
+      setStatus('Sending e-mail…');
+      const sent = await call('emailPdf', pin, list.join(','), m.label, name, bytesToB64(out), items.length);
+      fill.style.width = '100%';
+      try { localStorage.setItem('starEmailTo', list.join(', ')); } catch (e) {}
+      setStatus('E-mailed ' + m.label + ' (' + plural(items.length) + ') to ' + sent.join(', ') + '.');
+    } catch (e) {
+      setStatus('Could not send: ' + (e && e.message ? e.message : e), true);
+    } finally {
+      busy(false);
     }
   };
 
