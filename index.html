@@ -69,6 +69,13 @@
     <div id="status"></div>
     <div id="result"></div>
   </div>
+  <div class="card">
+    <h2>Staff list</h2>
+    <p style="margin:0 0 10px;font-size:14px;color:var(--muted)">After editing "Copy of W19 Staff List" in Google Drive, tap this
+      to update the names in the nomination form.</p>
+    <button class="go alt" id="staff">Refresh staff names</button>
+    <div id="staffMsg" style="font-size:13px;margin-top:8px;min-height:20px"></div>
+  </div>
   </div>
 </main>
 
@@ -237,6 +244,17 @@ async function buildMonthPdf(PDFLib, monthLabel, items, pdfBytesList, withSummar
     } finally {
       busy(false);
     }
+  };
+
+  $('staff').onclick = async () => {
+    const b = $('staff'), out = $('staffMsg');
+    b.disabled = true; out.className = ''; out.textContent = 'Updating the form…';
+    try {
+      const n = await call('refreshStaff', pin);
+      out.textContent = 'Done – the form now lists ' + n + ' staff names.';
+    } catch (e) {
+      out.className = 'err'; out.textContent = 'Could not update: ' + (e && e.message ? e.message : e);
+    } finally { b.disabled = false; }
   };
 
   const showPin = msg => {
